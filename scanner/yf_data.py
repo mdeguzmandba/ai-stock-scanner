@@ -4,10 +4,12 @@ yf_data.py — Pull OHLCV from yfinance, compute VWAP and EMA9
 
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, date
+from concurrent.futures import ThreadPoolExecutor
 import warnings
 
 warnings.filterwarnings("ignore")
+
+MAX_WORKERS = 8  # concurrent yfinance fetches
 
 
 def get_stock_data(ticker: str) -> dict:
@@ -90,16 +92,27 @@ def get_stock_data(ticker: str) -> dict:
     return result
 
 
-def enrich_movers(movers: list[dict]) -> list[dict]:
+def enrich_movers(movers: list[dict], max_workers: int = MAX_WORKERS) -> list[dict]:
     """
     Take list of movers from finviz, enrich each with yfinance data.
-    Filters out stocks that fail hard criteria.
+    Fetches tickers concurrently, then filters out stocks that fail hard criteria.
     """
-    enriched = []
+    # Dedupe by ticker (keep first occurrence) so we never fetch twice
+    seen = set()
+    unique = []
     for stock in movers:
+        if stock["ticker"] not in seen:
+            seen.add(stock["ticker"])
+            unique.append(stock)
+
+    print(f"[yf] Fetching {len(unique)} tickers ({max_workers} parallel)...", flush=True)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        datas = list(pool.map(lambda s: get_stock_data(s["ticker"]), unique))
+
+    enriched = []
+    for stock, data in zip(unique, datas):
         ticker = stock["ticker"]
-        print(f"[yf] Fetching {ticker}...", end=" ", flush=True)
-        data = get_stock_data(ticker)
+        print(f"[yf] {ticker:6s}", end=" ", flush=True)
 
         if data["error"]:
             print(f"skip ({data['error']})")

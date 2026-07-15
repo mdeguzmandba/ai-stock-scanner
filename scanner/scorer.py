@@ -4,7 +4,16 @@ Max score: 25. Need ≥15 to trade (or ≥13 aggressive / ≥18 conservative).
 """
 
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+
+THRESHOLDS = {
+    "normal": 15,
+    "aggressive": 13,
+    "conservative": 18,
+}
+MAX_CATALYST_SCORE = 5
+MAX_WORKERS = 8  # concurrent catalyst lookups
 
 
 # ── Catalyst detection ──────────────────────────────────────────────────────
@@ -119,7 +128,25 @@ def score_gap(gap_pct: float) -> int:
         return 0
 
 
-# ── Main scoring function ───────────────────────────────────────────────────
+# ── Main scoring functions ──────────────────────────────────────────────────
+
+def _score_base(stock: dict) -> dict:
+    """Compute the 4 local (no-network) scores: vwap, ema9, volume, gap."""
+    price = stock.get("price_premarket", 0.0)
+    return {
+        "vwap": score_vwap(price, stock.get("vwap", 0.0)),
+        "ema9": score_ema9(price, stock.get("ema9", 0.0)),
+        "volume": score_volume(stock.get("volume_ratio", 0.0)),
+        "gap": score_gap(stock.get("gap_pct", 0.0)),
+    }
+
+
+def _finalize(stock: dict, base: dict, cat_score: int, catalyst_desc: str) -> dict:
+    stock["catalyst"] = catalyst_desc
+    stock["smb_score"] = cat_score + sum(base.values())
+    stock["score_breakdown"] = {"catalyst": cat_score, **base}
+    return stock
+
 
 def score_stock(stock: dict) -> dict:
     """
@@ -127,31 +154,47 @@ def score_stock(stock: dict) -> dict:
     Adds 'smb_score', 'score_breakdown', 'catalyst' keys.
     Returns updated stock dict.
     """
-    ticker = stock.get("ticker", "")
-    price = stock.get("price_premarket", 0.0)
-    vwap = stock.get("vwap", 0.0)
-    ema9 = stock.get("ema9", 0.0)
-    gap_pct = stock.get("gap_pct", 0.0)
-    vol_ratio = stock.get("volume_ratio", 0.0)
+    base = _score_base(stock)
+    cat_score, catalyst_desc = score_catalyst(
+        stock.get("ticker", ""), stock.get("gap_pct", 0.0)
+    )
+    return _finalize(stock, base, cat_score, catalyst_desc)
 
-    cat_score, catalyst_desc = score_catalyst(ticker, gap_pct)
-    vwap_score = score_vwap(price, vwap)
-    ema9_score = score_ema9(price, ema9)
-    vol_score = score_volume(vol_ratio)
-    gap_score = score_gap(gap_pct)
 
-    total = cat_score + vwap_score + ema9_score + vol_score + gap_score
+def score_stocks(
+    stocks: list[dict],
+    mode: str = "normal",
+    max_workers: int = MAX_WORKERS,
+) -> list[dict]:
+    """
+    Score a batch of stocks. The 4 local scores are computed first; the
+    catalyst lookup (an HTTP request per ticker) only runs for stocks that
+    could still reach the mode's threshold with a perfect catalyst score,
+    and those lookups run concurrently.
+    """
+    min_score = THRESHOLDS.get(mode, 15)
 
-    stock["catalyst"] = catalyst_desc
-    stock["smb_score"] = total
-    stock["score_breakdown"] = {
-        "catalyst": cat_score,
-        "vwap": vwap_score,
-        "ema9": ema9_score,
-        "volume": vol_score,
-        "gap": gap_score,
-    }
-    return stock
+    needs_catalyst = []
+    for stock in stocks:
+        base = _score_base(stock)
+        if sum(base.values()) + MAX_CATALYST_SCORE < min_score:
+            # Can't reach threshold even with a perfect catalyst — skip the lookup
+            _finalize(stock, base, 1, "No catalyst confirmed (gap on volume)")
+        else:
+            needs_catalyst.append((stock, base))
+
+    if needs_catalyst:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            cat_results = list(pool.map(
+                lambda sb: score_catalyst(
+                    sb[0].get("ticker", ""), sb[0].get("gap_pct", 0.0)
+                ),
+                needs_catalyst,
+            ))
+        for (stock, base), (cat_score, desc) in zip(needs_catalyst, cat_results):
+            _finalize(stock, base, cat_score, desc)
+
+    return stocks
 
 
 def filter_tradeable(
@@ -162,12 +205,7 @@ def filter_tradeable(
     Filter stocks by minimum SMB score based on mode.
     Modes: 'normal' (≥15), 'aggressive' (≥13), 'conservative' (≥18)
     """
-    thresholds = {
-        "normal": 15,
-        "aggressive": 13,
-        "conservative": 18,
-    }
-    min_score = thresholds.get(mode, 15)
+    min_score = THRESHOLDS.get(mode, 15)
     tradeable = [s for s in stocks if s.get("smb_score", 0) >= min_score]
     return sorted(tradeable, key=lambda x: x["smb_score"], reverse=True)
 

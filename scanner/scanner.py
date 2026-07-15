@@ -18,6 +18,7 @@ import sys
 import os
 import argparse
 import shutil
+import time
 from datetime import datetime, date
 
 # Allow running as `python3 scanner/scanner.py` from repo root
@@ -25,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from finviz import get_premarket_movers
 from yf_data import enrich_movers
-from scorer import score_stock, filter_tradeable
+from scorer import score_stocks, filter_tradeable
 from positions import size_all_positions, MAX_POSITIONS, DEFAULT_RR
 from telegram import send_picks
 
@@ -118,6 +119,7 @@ def save_output(output: dict, path: str, history_dir: str):
 def main():
     args = parse_args()
     mode = args.mode
+    t0 = time.perf_counter()
 
     print(f"\n{'='*60}")
     print(f"  AI Pre-Market Scanner | {date.today()} | mode={mode}")
@@ -141,10 +143,8 @@ def main():
 
     # ── Step 3: Score each stock ───────────────────────────────
     print("[3/5] Scoring with SMB 5-step framework...")
-    scored = []
-    for stock in enriched:
-        stock = score_stock(stock)
-        scored.append(stock)
+    scored = score_stocks(enriched, mode=mode)
+    for stock in scored:
         bd = stock.get("score_breakdown", {})
         print(
             f"      {stock['ticker']:6s} SMB={stock['smb_score']:2d}/25 "
@@ -186,7 +186,8 @@ def main():
     if not args.no_telegram:
         send_picks(output)
 
-    print(f"\n✅ Scanner complete. {len(sized)} trade(s) found.\n")
+    elapsed = time.perf_counter() - t0
+    print(f"\n✅ Scanner complete in {elapsed:.1f}s. {len(sized)} trade(s) found.\n")
 
 
 if __name__ == "__main__":
