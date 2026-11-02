@@ -250,6 +250,16 @@ class TestTradePnl(unittest.TestCase):
         self.assertEqual(pnl["pnl_usd"], money("5.00"))
         self.assertEqual(pnl["r_multiple"], money("1.000"))
 
+    def test_negative_dust_is_unsigned_zero_and_flat(self):
+        # Exit 9.9996 is a -0.0004 move. Cents round to 0, and the sign bit
+        # must not survive as a printed "-0.00".
+        pnl = TradeMath.trade_pnl("long", 1, "10", "9", "9.9996")
+        self.assertEqual(format(pnl["pnl_usd"], "f"), "0.00")
+        self.assertEqual(pnl["pnl_usd"].as_tuple().sign, 0)
+        self.assertEqual(format(pnl["r_multiple"], "f"), "0.000")
+        self.assertEqual(pnl["r_multiple"].as_tuple().sign, 0)
+        self.assertEqual(pnl["outcome"], "FLAT")
+
     def test_half_cent_loss_rounds_away_from_zero_and_is_a_loss(self):
         # Exact gross -0.005 rounds to -0.01. A raw +0.004 rounds to 0.00 FLAT.
         loss = TradeMath.trade_pnl("long", 1, 10, 9, "9.995")

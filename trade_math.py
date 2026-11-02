@@ -361,7 +361,12 @@ class TradeMath:
 
     @staticmethod
     def _q(value: Decimal, quantum: Decimal) -> Decimal:
-        return value.quantize(quantum, rounding=ROUND_HALF_UP)
+        rounded = value.quantize(quantum, rounding=ROUND_HALF_UP)
+        # Decimal keeps a minus sign on zero. A sub-cent loss must print as
+        # 0.00 and classify as FLAT, not as "-0.00".
+        if rounded.is_zero():
+            return Decimal(0).quantize(quantum)
+        return rounded
 
     @staticmethod
     def _floor_div(numerator: Decimal, denominator: Decimal) -> int:
